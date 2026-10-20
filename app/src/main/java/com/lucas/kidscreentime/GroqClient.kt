@@ -15,11 +15,12 @@ import java.net.URL
 object GroqClient {
 
     private const val TAG = "GroqClient"
+    private const val API_URL = "https://api.groq.com/openai/v1/chat/completions"
+    private const val MAX_ANSWER_LEN = 20
 
     /** Última falha da IA (vazio = tudo certo). A tela dos pais exibe isso. */
     @Volatile
     var lastError: String = ""
-    private const val API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     // Se um modelo for descontinuado, troque aqui (veja console.groq.com/docs/models).
     private val MODELS = listOf("openai/gpt-oss-120b", "openai/gpt-oss-20b")
@@ -50,12 +51,15 @@ object GroqClient {
     }
 
     private fun userPrompt(count: Int): String =
-        "Crie $count perguntas de múltipla escolha, todas diferentes entre si (sorteio #${(1000..9999).random()}). " +
+        "Crie $count perguntas em que a criança DIGITA a resposta, todas diferentes entre si (sorteio #${(1000..9999).random()}). " +
         "Varie os temas: letra inicial de uma palavra, completar palavra simples, sílaba inicial, rimas, " +
-        "animais e natureza, cores e formas, partes do corpo, 'qual é diferente', dias da semana, frutas. " +
+        "animais e natureza, cores e formas, partes do corpo, dias da semana, frutas. " +
         "NÃO faça perguntas de contas de matemática. " +
-        "Cada pergunta tem exatamente 3 opções curtas e apenas UMA correta (não repita a opção). " +
-        "Formato exato: {\"questions\":[{\"text\":\"Com qual letra começa BOLA?\",\"options\":[\"B\",\"M\",\"P\"],\"answer_index\":0}]}"
+        "A resposta esperada deve ser UMA letra ou UMA palavra curta (até 8 letras), com apenas uma resposta possível. " +
+        "Evite perguntas que tenham várias respostas corretas. " +
+        "Use \"accepted\" só para variações realmente válidas da mesma resposta (pode ser lista vazia). " +
+        "Formato exato: {\"questions\":[{\"topic\":\"português\",\"type\":\"letra inicial\"," +
+        "\"text\":\"Com qual letra começa BOLA?\",\"answer\":\"B\",\"accepted\":[]}]}"
 
     private fun request(model: String, count: Int): List<EduQuestion> {
         val body = JSONObject()
@@ -101,21 +105,27 @@ object GroqClient {
         return if (s >= 0 && e > s) content.substring(s, e + 1) else content
     }
 
+    /** Valida cada item: descarta sem enunciado, sem resposta ou com resposta longa demais. */
     private fun parse(content: String): List<EduQuestion> {
         val arr = JSONObject(extractJson(content)).getJSONArray("questions")
         val out = mutableListOf<EduQuestion>()
         for (i in 0 until arr.length()) {
             try {
                 val o = arr.getJSONObject(i)
-                val text = o.getString("text").trim()
-                val optsArr = o.getJSONArray("options")
-                val opts = List(optsArr.length()) { optsArr.getString(it).trim() }
-                val idx = o.getInt("answer_index")
-                if (text.isBlank() || opts.size != 3 || opts.toSet().size != 3 || idx !in 0..2) continue
+                val text = o.optString("text", "").trim()
+                val answer = o.optString("answer", "").trim()
+                if (text.isBlank() || answer.isBlank() || answer.length > MAX_ANSWER_LEN) continue
 
-                // IA costuma colocar a resposta certa sempre na 1ª posição: embaralha.
-                val order = (0..2).shuffled()
-                out.add(EduQuestion(text, order.map { opts[it] }, order.indexOf(idx)))
+                val accArr = o.optJSONArray("accepted")
+                val accepted = if (accArr == null) {
+                    emptyList()
+                } else {
+                    List(accArr.length()) { accArr.optString(it).trim() }
+                        .filter { it.isNotBlank() && it.length <= MAX_ANSWER_LEN }
+                }
+                val topic = o.optString("topic", "").trim().lowercase().ifBlank { "português" }
+                val type = o.optString("type", "").trim().ifBlank { "livre" }
+                out.add(EduQuestion(text, answer, topic, type, accepted))
             } catch (e: Exception) {
                 // ignora item mal formado
             }

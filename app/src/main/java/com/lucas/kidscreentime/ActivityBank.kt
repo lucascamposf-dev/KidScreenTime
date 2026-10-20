@@ -3,21 +3,63 @@ package com.lucas.kidscreentime
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.Normalizer
 import kotlin.random.Random
 
-/** Pergunta de múltipla escolha (3 opções, 1 correta). */
-data class EduQuestion(val text: String, val options: List<String>, val correctIndex: Int) {
+/**
+ * Pergunta de resposta DIGITADA.
+ * [answer] é a resposta esperada (curta); [accepted] são variações aceitas.
+ * [numeric] = true abre teclado numérico.
+ */
+data class EduQuestion(
+    val text: String,
+    val answer: String,
+    val topic: String = "português",
+    val type: String = "livre",
+    val accepted: List<String> = emptyList(),
+    val numeric: Boolean = false
+) {
+
+    /** Ignora maiúsculas, espaços nas pontas/duplicados e acentos. */
+    fun isCorrect(given: String): Boolean {
+        val g = normalize(given)
+        if (g.isEmpty()) return false
+        return (listOf(answer) + accepted).any { normalize(it) == g }
+    }
 
     fun toJson(): JSONObject = JSONObject()
         .put("t", text)
-        .put("o", JSONArray(options))
-        .put("c", correctIndex)
+        .put("a", answer)
+        .put("tp", topic)
+        .put("ty", type)
+        .put("x", JSONArray(accepted))
+        .put("n", numeric)
 
     companion object {
+        fun normalize(s: String): String =
+            Normalizer.normalize(s.trim(), Normalizer.Form.NFD)
+                .replace(Regex("\\p{Mn}+"), "")
+                .lowercase()
+                .replace(Regex("\\s+"), " ")
+
+        /** Itens no formato antigo (múltipla escolha, sem chave "a") são descartados. */
         fun fromJson(o: JSONObject): EduQuestion? = try {
-            val arr = o.getJSONArray("o")
-            val opts = List(arr.length()) { arr.getString(it) }
-            EduQuestion(o.getString("t"), opts, o.getInt("c"))
+            val text = o.getString("t")
+            val answer = o.optString("a", "")
+            if (text.isBlank() || answer.isBlank()) {
+                null
+            } else {
+                val arr = o.optJSONArray("x")
+                val accepted = if (arr == null) emptyList() else List(arr.length()) { arr.getString(it) }
+                EduQuestion(
+                    text = text,
+                    answer = answer,
+                    topic = o.optString("tp", "português"),
+                    type = o.optString("ty", "livre"),
+                    accepted = accepted,
+                    numeric = o.optBoolean("n", false)
+                )
+            }
         } catch (e: Exception) {
             null
         }
@@ -69,15 +111,14 @@ object ActivityBank {
         }
     }
 
-    private fun build(text: String, correct: Int): EduQuestion {
-        val set = linkedSetOf(correct)
-        while (set.size < 3) {
-            val d = correct + Random.nextInt(-3, 4)
-            if (d >= 0) set.add(d)
-        }
-        val list = set.toList().shuffled()
-        return EduQuestion(text, list.map { it.toString() }, list.indexOf(correct))
-    }
+    private fun build(text: String, correct: Int): EduQuestion =
+        EduQuestion(
+            text = text,
+            answer = correct.toString(),
+            topic = "matemática",
+            type = "conta",
+            numeric = true
+        )
 
     private fun loadQueue(context: Context): MutableList<EduQuestion> {
         val json = PrefsHelper.getQuestionQueueJson(context) ?: return mutableListOf()
