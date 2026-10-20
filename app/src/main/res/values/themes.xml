@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.KidScreenTime" parent="Theme.MaterialComponents.DayNight.NoActionBar" />
+
+    <!-- Tema usado só para inflar a tela de bloqueio (janela sobreposta) -->
+    <style name="Theme.KidScreenTime.Overlay" parent="android:Theme.Material.NoActionBar" />
+</resources>
