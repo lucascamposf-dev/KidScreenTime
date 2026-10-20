@@ -18,7 +18,7 @@ object GroqClient {
     private const val API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     // Se um modelo for descontinuado, troque aqui (veja console.groq.com/docs/models).
-    private val MODELS = listOf("llama-3.3-70b-versatile", "llama-3.1-8b-instant")
+    private val MODELS = listOf("openai/gpt-oss-120b", "openai/gpt-oss-20b")
 
     private const val SYSTEM_PROMPT =
         "Você cria atividades educativas para uma criança brasileira de 6 anos que está aprendendo a ler. " +
@@ -32,9 +32,14 @@ object GroqClient {
         for (model in MODELS) {
             try {
                 val result = request(model, count)
-                if (result.isNotEmpty()) return result
+                if (result.isNotEmpty()) {
+                    lastError = ""
+                    return result
+                }
+                lastError = "$model: resposta sem perguntas válidas"
             } catch (e: Exception) {
                 Log.w(TAG, "Falha com $model: ${e.message}")
+                lastError = "$model: ${e.message}"
             }
         }
         return emptyList()
@@ -52,7 +57,8 @@ object GroqClient {
         val body = JSONObject()
             .put("model", model)
             .put("temperature", 0.9)
-            .put("max_tokens", 2500)
+            .put("max_tokens", 4000)
+            .put("reasoning_effort", "low")
             .put("response_format", JSONObject().put("type", "json_object"))
             .put(
                 "messages", JSONArray()
@@ -85,8 +91,14 @@ object GroqClient {
         }
     }
 
+    private fun extractJson(content: String): String {
+        val s = content.indexOf('{')
+        val e = content.lastIndexOf('}')
+        return if (s >= 0 && e > s) content.substring(s, e + 1) else content
+    }
+
     private fun parse(content: String): List<EduQuestion> {
-        val arr = JSONObject(content).getJSONArray("questions")
+        val arr = JSONObject(extractJson(content)).getJSONArray("questions")
         val out = mutableListOf<EduQuestion>()
         for (i in 0 until arr.length()) {
             try {

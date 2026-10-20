@@ -263,7 +263,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val list = withContext(Dispatchers.IO) { GroqClient.fetchQuestions(10) }
             if (list.isEmpty()) {
-                Toast.makeText(this@MainActivity, "Falhou (sem internet, chave inválida ou limite do Groq). Veja o Logcat: GroqClient", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "Falhou: ${GroqClient.lastError.take(150)}", Toast.LENGTH_LONG).show()
             } else {
                 ActivityBank.push(this@MainActivity, list)
                 Toast.makeText(this@MainActivity, "${list.size} atividades novas ✔", Toast.LENGTH_SHORT).show()
@@ -303,7 +303,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val ia = if (GroqClient.isConfigured())
-            "✅ IA Groq: ${ActivityBank.queueSize(this)} atividades guardadas"
+            "✅ IA Groq: ${ActivityBank.queueSize(this)} atividades guardadas" + (if (GroqClient.lastError.isNotBlank()) "\n⚠ Último erro da IA: ${GroqClient.lastError}" else "")
         else "⚠ IA Groq sem chave (só continhas de matemática)"
 
         tvStatus.text = listOf(
