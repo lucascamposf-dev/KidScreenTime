@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import android.util.TypedValue
 import android.view.ContextThemeWrapper
@@ -43,6 +44,7 @@ class LockOverlay(
     private lateinit var etPin: EditText
 
     private var current: EduQuestion? = null
+    private var lastAnswerAt = 0L
 
     val isShowing: Boolean get() = root?.isAttachedToWindow == true
 
@@ -123,17 +125,20 @@ class LockOverlay(
         val done = PrefsHelper.isActivityDone(context)
         val total = PrefsHelper.requiredAnswers(context)
         val correct = PrefsHelper.correctCount(context)
+        val stats = "✔ ${PrefsHelper.cycleCorrectCount(context)} acertos · " +
+                "✖ ${PrefsHelper.cycleWrongCount(context)} erros · " +
+                "+${PrefsHelper.extraMinutesAccumulated(context)} min"
 
         val timeLeft = formatMs(remaining)
         if (done) {
             tvTitle.text = "Parabéns! 🎉"
-            tvProgress.text = ""
+            tvProgress.text = stats
             tvQuestion.text = "Você já fez a atividade.\nAgora descanse um pouquinho!"
             llOptions.visibility = View.GONE
             tvCountdown.text = if (remaining > 0) "Volte a usar o celular em: $timeLeft" else "Liberando..."
         } else {
             tvTitle.text = "Hora da pausa! 🧠"
-            tvProgress.text = "Acertos: $correct de $total"
+            tvProgress.text = "$stats\nAcertos para liberar: $correct de $total"
             llOptions.visibility = View.VISIBLE
             tvCountdown.text = if (remaining > 0) "Pausa termina em: $timeLeft" else "A pausa já acabou. Falta só a atividade!"
         }
@@ -174,12 +179,18 @@ class LockOverlay(
     private fun onAnswer(index: Int) {
         val q = current ?: return
         if (PrefsHelper.isActivityDone(context)) return
+        // Ignora toques repetidos em menos de 1s (toque duplo não conta dois acertos).
+        val now = SystemClock.uptimeMillis()
+        if (now - lastAnswerAt < 1_000L) return
+        lastAnswerAt = now
         if (index == q.correctIndex) {
             PrefsHelper.registerCorrect(context)
+            PrefsHelper.registerCycleCorrect(context)
             tvFeedback.setTextColor(Color.parseColor("#A7F3D0"))
             tvFeedback.text = "Muito bem! 🎉"
             if (!PrefsHelper.isActivityDone(context)) loadQuestion()
         } else {
+            PrefsHelper.registerCycleWrong(context)
             tvFeedback.setTextColor(Color.parseColor("#FCA5A5"))
             tvFeedback.text = "Quase! Tente outra 😊"
             loadQuestion() // pergunta nova, para não dar pra "chutar até acertar" a mesma

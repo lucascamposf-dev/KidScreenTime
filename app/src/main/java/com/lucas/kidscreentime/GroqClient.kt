@@ -15,6 +15,10 @@ import java.net.URL
 object GroqClient {
 
     private const val TAG = "GroqClient"
+
+    /** Última falha da IA (vazio = tudo certo). A tela dos pais exibe isso. */
+    @Volatile
+    var lastError: String = ""
     private const val API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     // Se um modelo for descontinuado, troque aqui (veja console.groq.com/docs/models).

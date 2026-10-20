@@ -83,6 +83,20 @@
             android:hint="Acertos necessários para liberar"
             android:inputType="number" />
 
+        <EditText
+            android:id="@+id/etPenaltyMin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Minutos extras por erro"
+            android:inputType="number" />
+
+        <EditText
+            android:id="@+id/etPenaltyCap"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Teto de minutos extras por ciclo"
+            android:inputType="number" />
+
         <Button
             android:id="@+id/btnSave"
             android:layout_width="match_parent"

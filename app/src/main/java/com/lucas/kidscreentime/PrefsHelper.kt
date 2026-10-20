@@ -22,10 +22,17 @@ object PrefsHelper {
     const val DEFAULT_USAGE_MIN = 60
     const val DEFAULT_BREAK_MIN = 30
     const val DEFAULT_REQUIRED_ANSWERS = 3
+    const val DEFAULT_PENALTY_MIN = 5
+    const val DEFAULT_PENALTY_CAP_MIN = 60
 
     private const val KEY_USAGE_MIN = "usage_limit_min"
     private const val KEY_BREAK_MIN = "break_min"
     private const val KEY_REQUIRED = "required_answers"
+    private const val KEY_PENALTY_MIN = "penalty_min_per_error"
+    private const val KEY_PENALTY_CAP_MIN = "penalty_cap_min_per_cycle"
+    private const val KEY_CYCLE_CORRECT = "cycle_correct_count"
+    private const val KEY_CYCLE_WRONG = "cycle_wrong_count"
+    private const val KEY_EXTRA_MINUTES = "extra_minutes_accumulated"
     private const val KEY_ACCUMULATED_USAGE_MS = "accumulated_usage_ms"
     private const val KEY_IS_LOCKED = "is_locked"
     private const val KEY_ACTIVITY_DONE = "activity_done"
@@ -46,15 +53,29 @@ object PrefsHelper {
     fun usageLimitMin(c: Context): Int = prefs(c).getInt(KEY_USAGE_MIN, DEFAULT_USAGE_MIN)
     fun breakMin(c: Context): Int = prefs(c).getInt(KEY_BREAK_MIN, DEFAULT_BREAK_MIN)
     fun requiredAnswers(c: Context): Int = prefs(c).getInt(KEY_REQUIRED, DEFAULT_REQUIRED_ANSWERS)
+    fun penaltyMinPerError(c: Context): Int =
+        prefs(c).getInt(KEY_PENALTY_MIN, DEFAULT_PENALTY_MIN)
+
+    fun penaltyCapMinPerCycle(c: Context): Int =
+        prefs(c).getInt(KEY_PENALTY_CAP_MIN, DEFAULT_PENALTY_CAP_MIN)
 
     fun usageLimitMs(c: Context): Long = usageLimitMin(c) * 60_000L
     fun breakMs(c: Context): Long = breakMin(c) * 60_000L
 
-    fun saveSettings(c: Context, usageMin: Int, breakMin: Int, required: Int) {
+    fun saveSettings(
+        c: Context,
+        usageMin: Int,
+        breakMin: Int,
+        required: Int,
+        penaltyMin: Int,
+        penaltyCapMin: Int
+    ) {
         prefs(c).edit()
             .putInt(KEY_USAGE_MIN, usageMin.coerceAtLeast(1))
             .putInt(KEY_BREAK_MIN, breakMin.coerceAtLeast(1))
             .putInt(KEY_REQUIRED, required.coerceIn(1, 10))
+            .putInt(KEY_PENALTY_MIN, penaltyMin.coerceAtLeast(0))
+            .putInt(KEY_PENALTY_CAP_MIN, penaltyCapMin.coerceAtLeast(0))
             .apply()
     }
 
@@ -81,6 +102,9 @@ object PrefsHelper {
             .putBoolean(KEY_IS_LOCKED, true)
             .putBoolean(KEY_ACTIVITY_DONE, false)
             .putInt(KEY_CORRECT_COUNT, 0)
+            .putInt(KEY_CYCLE_CORRECT, 0)
+            .putInt(KEY_CYCLE_WRONG, 0)
+            .putInt(KEY_EXTRA_MINUTES, 0)
             .putLong(KEY_BREAK_END_TIMESTAMP, System.currentTimeMillis() + breakMs(c))
             .apply()
     }
@@ -106,12 +130,48 @@ object PrefsHelper {
     /** Pode liberar quando a atividade foi feita E os minutos de pausa passaram. */
     fun canUnlock(c: Context): Boolean = isActivityDone(c) && remainingBreakMs(c) <= 0L
 
+    // ---------- Penalidade por erro (ciclo atual) ----------
+
+    fun cycleCorrectCount(c: Context): Int = prefs(c).getInt(KEY_CYCLE_CORRECT, 0)
+    fun cycleWrongCount(c: Context): Int = prefs(c).getInt(KEY_CYCLE_WRONG, 0)
+    fun extraMinutesAccumulated(c: Context): Int = prefs(c).getInt(KEY_EXTRA_MINUTES, 0)
+
+    /** Acerto na atividade: só conta para o placar do ciclo. */
+    fun registerCycleCorrect(c: Context) {
+        prefs(c).edit().putInt(KEY_CYCLE_CORRECT, cycleCorrectCount(c) + 1).apply()
+    }
+
+    /**
+     * Erro: soma os minutos extras ao fim da pausa, sem ultrapassar o teto do ciclo.
+     * Retorna os minutos extras acumulados no ciclo.
+     */
+    fun registerCycleWrong(c: Context): Int {
+        val before = extraMinutesAccumulated(c)
+        val after = (before + penaltyMinPerError(c)).coerceAtMost(penaltyCapMinPerCycle(c))
+        val e = prefs(c).edit()
+            .putInt(KEY_CYCLE_WRONG, cycleWrongCount(c) + 1)
+            .putInt(KEY_EXTRA_MINUTES, after)
+        val addedMin = after - before
+        if (addedMin > 0 && isLocked(c)) {
+            e.putLong(
+                KEY_BREAK_END_TIMESTAMP,
+                                   maxOf(prefs(c).getLong(KEY_BREAK_END_TIMESTAMP, 0L), System.currentTimeMillis()) +
+                        addedMin * 60_000L
+            )
+        }
+        e.apply()
+        return after
+    }
+
     /** Fim do ciclo (ou liberação pelos pais): zera tudo para o próximo ciclo. */
     fun unlockAndReset(c: Context) {
         prefs(c).edit()
             .putBoolean(KEY_IS_LOCKED, false)
             .putBoolean(KEY_ACTIVITY_DONE, false)
             .putInt(KEY_CORRECT_COUNT, 0)
+            .putInt(KEY_CYCLE_CORRECT, 0)
+            .putInt(KEY_CYCLE_WRONG, 0)
+            .putInt(KEY_EXTRA_MINUTES, 0)
             .remove(KEY_BREAK_END_TIMESTAMP)
             .putLong(KEY_ACCUMULATED_USAGE_MS, 0L)
             .apply()

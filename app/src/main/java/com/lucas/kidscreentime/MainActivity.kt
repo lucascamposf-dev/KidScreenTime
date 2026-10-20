@@ -37,6 +37,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etUsageMin: EditText
     private lateinit var etBreakMin: EditText
     private lateinit var etRequired: EditText
+    private lateinit var etPenaltyMin: EditText
+    private lateinit var etPenaltyCap: EditText
 
     private var authenticated = false
     private var leavingForSettings = false
@@ -62,6 +64,8 @@ class MainActivity : AppCompatActivity() {
         etUsageMin = findViewById(R.id.etUsageMin)
         etBreakMin = findViewById(R.id.etBreakMin)
         etRequired = findViewById(R.id.etRequired)
+        etPenaltyMin = findViewById(R.id.etPenaltyMin)
+        etPenaltyCap = findViewById(R.id.etPenaltyCap)
 
         findViewById<Button>(R.id.btnOverlay).setOnClickListener { requestOverlayPermission() }
         findViewById<Button>(R.id.btnBattery).setOnClickListener { requestIgnoreBatteryOptimizations() }
@@ -239,11 +243,19 @@ class MainActivity : AppCompatActivity() {
         val u = etUsageMin.text.toString().toIntOrNull()
         val b = etBreakMin.text.toString().toIntOrNull()
         val r = etRequired.text.toString().toIntOrNull()
-        if (u == null || b == null || r == null || u < 1 || b < 1 || r < 1) {
-            Toast.makeText(this, "Preencha os 3 campos com números maiores que 0", Toast.LENGTH_SHORT).show()
+        val p = etPenaltyMin.text.toString().toIntOrNull()
+        val cap = etPenaltyCap.text.toString().toIntOrNull()
+        if (u == null || b == null || r == null || p == null || cap == null ||
+            u < 1 || b < 1 || r < 1 || p < 0 || cap < 0
+        ) {
+            Toast.makeText(
+                this,
+                "Preencha os 5 campos com números válidos (extras podem ser 0)",
+                Toast.LENGTH_SHORT
+            ).show()
             return
         }
-        PrefsHelper.saveSettings(this, u, b, r)
+        PrefsHelper.saveSettings(this, u, b, r, p, cap)
         loadSettingsIntoFields()
         Toast.makeText(this, "Regras salvas ✔", Toast.LENGTH_SHORT).show()
     }
@@ -252,6 +264,8 @@ class MainActivity : AppCompatActivity() {
         etUsageMin.setText(PrefsHelper.usageLimitMin(this).toString())
         etBreakMin.setText(PrefsHelper.breakMin(this).toString())
         etRequired.setText(PrefsHelper.requiredAnswers(this).toString())
+        etPenaltyMin.setText(PrefsHelper.penaltyMinPerError(this).toString())
+        etPenaltyCap.setText(PrefsHelper.penaltyCapMinPerCycle(this).toString())
     }
 
     private fun generateNow() {
