@@ -2,6 +2,9 @@ package com.lucas.kidscreentime
 
 import android.content.Context
 import java.security.MessageDigest
+import java.security.SecureRandom
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
 
 /**
  * Estado do controle de tempo de tela em SharedPreferences
@@ -29,6 +32,9 @@ object PrefsHelper {
     private const val KEY_CORRECT_COUNT = "correct_count"
     private const val KEY_BREAK_END_TIMESTAMP = "break_end_timestamp"
     private const val KEY_PIN_HASH = "pin_hash"
+    private const val KEY_PIN_FAILS = "pin_fail_count"
+    private const val KEY_PIN_LOCK_UNTIL = "pin_lock_until"
+    private const val MAX_PIN_FAILS = 5
     private const val KEY_QUESTION_QUEUE = "question_queue"
     private const val KEY_HEARTBEAT = "heartbeat"
 
@@ -116,16 +122,53 @@ object PrefsHelper {
     fun hasPin(c: Context): Boolean = prefs(c).getString(KEY_PIN_HASH, null) != null
 
     fun setPin(c: Context, pin: String) {
-        prefs(c).edit().putString(KEY_PIN_HASH, hash(pin)).apply()
+        val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        prefs(c).edit().putString(KEY_PIN_HASH, "${salt.toHex()}:${pbkdf2(pin, salt)}").apply()
     }
 
-    fun checkPin(c: Context, pin: String): Boolean =
-        prefs(c).getString(KEY_PIN_HASH, null) == hash(pin)
+        fun checkPin(c: Context, pin: String): Boolean {
+        if (pinLockRemainingMs(c) > 0L) return false
+        val stored = prefs(c).getString(KEY_PIN_HASH, null) ?: return false
+        val parts = stored.split(":", limit = 2)
+        if (parts.size != 2) return false
+        val ok = MessageDigest.isEqual(
+            parts[1].toByteArray(Charsets.US_ASCII),
+            pbkdf2(pin, parts[0].hexToByteArray()).toByteArray(Charsets.US_ASCII)
+        )
+        if (ok) clearPinFails(c) else registerPinFail(c)
+        return ok
+    }
 
-    private fun hash(pin: String): String =
-        MessageDigest.getInstance("SHA-256")
-            .digest("kidscreentime:$pin".toByteArray())
-            .joinToString("") { "%02x".format(it) }
+    private fun pbkdf2(pin: String, salt: ByteArray): String {
+        val spec = PBEKeySpec(pin.toCharArray(), salt, 60_000, 256)
+        return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+            .generateSecret(spec).encoded.toHex()
+    }
+
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+
+    private fun String.hexToByteArray(): ByteArray =
+        chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+
+    fun pinFails(c: Context): Int = prefs(c).getInt(KEY_PIN_FAILS, 0)
+
+    fun pinLockRemainingMs(c: Context): Long =
+        (prefs(c).getLong(KEY_PIN_LOCK_UNTIL, 0L) - System.currentTimeMillis()).coerceAtLeast(0L)
+
+    fun registerPinFail(c: Context) {
+        val fails = pinFails(c) + 1
+        val e = prefs(c).edit().putInt(KEY_PIN_FAILS, fails)
+        if (fails >= MAX_PIN_FAILS) {
+            val lockMs = (30_000L shl (fails - MAX_PIN_FAILS).coerceAtMost(9))
+                .coerceAtMost(900_000L)
+            e.putLong(KEY_PIN_LOCK_UNTIL, System.currentTimeMillis() + lockMs)
+        }
+        e.apply()
+    }
+
+    fun clearPinFails(c: Context) {
+        prefs(c).edit().remove(KEY_PIN_FAILS).remove(KEY_PIN_LOCK_UNTIL).apply()
+    }
 
     // ---------- Fila de atividades (geradas pela IA) ----------
 

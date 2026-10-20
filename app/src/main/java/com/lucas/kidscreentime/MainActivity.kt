@@ -126,6 +126,12 @@ class MainActivity : AppCompatActivity() {
             .create()
         dialog.show()
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val wait = PrefsHelper.pinLockRemainingMs(this)
+            if (wait > 0) {
+                et.setText("")
+                et.hint = "Aguarde ${(wait + 999) / 1000}s"
+                return@setOnClickListener
+            }
             if (PrefsHelper.checkPin(this, et.text.toString())) {
                 authenticated = true
                 content.visibility = View.VISIBLE

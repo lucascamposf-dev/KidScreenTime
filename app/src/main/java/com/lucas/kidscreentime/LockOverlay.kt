@@ -192,6 +192,12 @@ class LockOverlay(
 
     private fun tryParentUnlock() {
         val pin = etPin.text.toString()
+                val wait = PrefsHelper.pinLockRemainingMs(context)
+        if (wait > 0) {
+            etPin.setText("")
+            etPin.hint = "Aguarde ${(wait + 999) / 1000}s"
+            return
+        }
         if (PrefsHelper.checkPin(context, pin)) {
             PrefsHelper.unlockAndReset(context)
             onStateChanged()
