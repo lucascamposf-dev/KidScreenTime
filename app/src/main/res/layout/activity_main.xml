@@ -18,6 +18,31 @@
             android:textSize="22sp"
             android:textStyle="bold" />
 
+        <LinearLayout
+            android:id="@+id/llUpdate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="#DCFCE7"
+            android:orientation="vertical"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/tvUpdate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#14532D"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/btnUpdate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Atualizar agora" />
+        </LinearLayout>
+
         <TextView
             android:id="@+id/tvStatus"
             android:layout_width="match_parent"
@@ -25,6 +50,22 @@
             android:layout_marginTop="16dp"
             android:lineSpacingExtra="4dp"
             android:textSize="16sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="Aprendizado"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvReport"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:lineSpacingExtra="4dp"
+            android:textSize="15sp" />
 
         <Button
             android:id="@+id/btnOverlay"
@@ -132,5 +173,12 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:text="Liberar celular agora e zerar contador" />
+
+        <Button
+            android:id="@+id/btnCheckUpdate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Procurar atualização do app" />
     </LinearLayout>
 </ScrollView>

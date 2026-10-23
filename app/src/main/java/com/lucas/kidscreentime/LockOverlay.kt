@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.speech.tts.TextToSpeech
 import android.text.InputType
 import android.util.Log
 import android.util.TypedValue
@@ -23,6 +24,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.util.Locale
 
 /**
  * Tela de bloqueio desenhada como JANELA SOBREPOSTA (permissão "Exibir sobre outros apps").
@@ -31,6 +33,9 @@ import android.widget.TextView
  *
  * Quem decide quando mostrar/esconder/liberar é o [TimeTrackerService]; aqui só desenhamos
  * e registramos os acertos. [onStateChanged] avisa o serviço para reavaliar na hora.
+ *
+ * Ao errar, a criança vê a resposta certa com uma explicação e precisa DIGITÁ-LA para seguir
+ * (sem novo castigo); a pergunta volta mais tarde para revisão. A pergunta pode ser lida em voz alta.
  */
 class LockOverlay(
     private val context: Context,
@@ -53,8 +58,13 @@ class LockOverlay(
     private var btnAnswer: Button? = null
 
     private var current: EduQuestion? = null
+    private var shownAt = 0L
+    private var copyMode = false
     private var lastAnswerAt = 0L
     private var inputBlocked = false
+
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
 
     val isShowing: Boolean get() = root?.isAttachedToWindow == true
 
@@ -73,10 +83,12 @@ class LockOverlay(
         etPin = v.findViewById(R.id.etPin)
         val btnParent: Button = v.findViewById(R.id.btnParent)
         val btnPinOk: Button = v.findViewById(R.id.btnPinOk)
+        val btnFlag: Button = v.findViewById(R.id.btnFlag)
 
         btnParent.visibility = if (PrefsHelper.hasPin(context)) View.VISIBLE else View.GONE
         btnParent.setOnClickListener { llPin.visibility = View.VISIBLE }
         btnPinOk.setOnClickListener { tryParentUnlock() }
+        btnFlag.setOnClickListener { flagCurrentQuestion() }
 
         // Engole o botão Voltar.
         v.isFocusableInTouchMode = true
@@ -114,6 +126,7 @@ class LockOverlay(
         }
         root = v
         v.requestFocus()
+        initTts()
         loadQuestion()
         refresh()
     }
@@ -130,6 +143,10 @@ class LockOverlay(
         root = null
         etAnswer = null
         btnAnswer = null
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
+        ttsReady = false
     }
 
     /** Chamado a cada segundo pelo serviço: atualiza contagem regressiva e estado. */
@@ -160,22 +177,58 @@ class LockOverlay(
 
     // ---------- Perguntas ----------
 
+    /** Mostra a pergunta em andamento (fica salva: reabrir a tela não troca de pergunta). */
     private fun loadQuestion() {
-        val q = ActivityBank.next(context)
+        val q = ActivityBank.current(context)
         current = q
+        shownAt = PrefsHelper.currentQuestionShownAt(context).takeIf { it > 0L } ?: System.currentTimeMillis()
+        copyMode = PrefsHelper.isCopyPending(context)
         inputBlocked = false
         tvQuestion.text = q.text
         llOptions.removeAllViews()
 
         val et = makeAnswerField(q)
         val btn = makeAnswerButton()
+        llOptions.addView(makeSpeakButton())
         llOptions.addView(et)
         llOptions.addView(btn)
         etAnswer = et
         btnAnswer = btn
 
+        if (copyMode) {
+            showCopyPrompt(q)
+        } else {
+            speak(q.speechText())
+        }
+
         et.requestFocus()
         et.postDelayed({ showKeyboard(et) }, 250)
+    }
+
+    private fun makeSpeakButton(): Button {
+        val b = Button(context)
+        b.text = "🔊 Ouvir"
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+        b.setTextColor(Color.WHITE)
+        b.isAllCaps = false
+        b.background = GradientDrawable().apply {
+            setColor(Color.parseColor("#3B82F6"))
+            cornerRadius = dp(16f)
+        }
+        val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(52f).toInt())
+        lp.gravity = Gravity.CENTER_HORIZONTAL
+        b.layoutParams = lp
+        b.setPadding(dp(24f).toInt(), 0, dp(24f).toInt(), 0)
+        b.setOnClickListener {
+            val q = current ?: return@setOnClickListener
+            if (!ttsReady) {
+                tvFeedback.setTextColor(Color.parseColor("#FDE68A"))
+                tvFeedback.text = "A voz não está disponível neste celular."
+                return@setOnClickListener
+            }
+            speak(if (copyMode) copySpeech(q) else q.speechText())
+        }
+        return b
     }
 
     private fun makeAnswerField(q: EduQuestion): EditText {
@@ -251,29 +304,110 @@ class LockOverlay(
         if (now - lastAnswerAt < 1_000L) return
         lastAnswerAt = now
 
-        if (q.isCorrect(given)) {
+        if (copyMode) {
+            submitCopy(q, given)
+            return
+        }
+
+        val correct = q.isCorrect(given)
+        AttemptLog.add(
+            context,
+            AttemptRecord(
+                timestampMs = System.currentTimeMillis(),
+                questionText = q.text,
+                givenAnswer = given,
+                isCorrect = correct,
+                topic = q.topic,
+                correctAnswer = q.answer,
+                shownAtMs = shownAt,
+                skill = q.type,
+                source = q.source
+            )
+        )
+        Progress.record(context, q.type, correct)
+
+        if (correct) {
             PrefsHelper.registerCorrect(context)
             PrefsHelper.registerCycleCorrect(context)
+            ActivityBank.finishCurrent(context)
             tvFeedback.setTextColor(Color.parseColor("#A7F3D0"))
             tvFeedback.text = "Muito bem! 🎉"
             if (!PrefsHelper.isActivityDone(context)) loadQuestion() else hideKeyboard()
         } else {
-            PrefsHelper.registerCycleWrong(context)
-            inputBlocked = true
-            etAnswer?.isEnabled = false
-            btnAnswer?.isEnabled = false
-            tvFeedback.setTextColor(Color.parseColor("#FCA5A5"))
-            tvFeedback.text = "A resposta era: ${q.answer}"
-            // Mostra a resposta certa por 4s e só então traz pergunta nova.
-            handler.postDelayed({
-                if (root != null && !PrefsHelper.isActivityDone(context)) {
-                    tvFeedback.text = ""
-                    loadQuestion()
-                }
-            }, WRONG_ANSWER_DELAY_MS)
+            // Pergunta da IA não dá castigo: mesmo conferida, ela pode estar errada.
+            PrefsHelper.registerCycleWrong(context, q.text, penalize = q.source != EduQuestion.SRC_AI)
+            ActivityBank.scheduleRetry(context, q)
+            PrefsHelper.setCopyPending(context, true)
+            copyMode = true
+            showCopyPrompt(q)
+            speak(copySpeech(q))
         }
         refresh()
         onStateChanged()
+    }
+
+    /** Depois do erro: mostra a resposta certa e a explicação, e pede para digitá-la. */
+    private fun showCopyPrompt(q: EduQuestion) {
+        etAnswer?.setText("")
+        etAnswer?.hint = "Digite: ${q.answer}"
+        btnAnswer?.text = "Continuar"
+        tvFeedback.setTextColor(Color.parseColor("#FCA5A5"))
+        val explain = if (q.explanation.isNotBlank()) "\n${q.explanation}" else ""
+        tvFeedback.text = "Quase! A resposta certa é: ${q.answer}$explain\nEscreva ${q.answer} para continuar."
+    }
+
+    private fun copySpeech(q: EduQuestion): String {
+        val answer = LocalQuestions.spoken(q.answer)
+        return "Quase! A resposta certa é $answer. ${q.explanation.lowercase()} Agora escreva $answer."
+    }
+
+    /** Modo cópia: não conta acerto nem erro; só fixa a forma certa. */
+    private fun submitCopy(q: EduQuestion, given: String) {
+        if (!q.isCorrect(given)) {
+            etAnswer?.setText("")
+            tvFeedback.setTextColor(Color.parseColor("#FDE68A"))
+            tvFeedback.text = "Copie com calma: ${q.answer}"
+            return
+        }
+        ActivityBank.finishCurrent(context)
+        copyMode = false
+        inputBlocked = true
+        etAnswer?.isEnabled = false
+        btnAnswer?.isEnabled = false
+        tvFeedback.setTextColor(Color.parseColor("#A7F3D0"))
+        tvFeedback.text = "Isso! Agora você aprendeu 💪"
+        speak("Isso! Muito bem.")
+        handler.postDelayed({
+            if (root != null && !PrefsHelper.isActivityDone(context)) {
+                tvFeedback.text = ""
+                loadQuestion()
+            }
+        }, COPY_DONE_DELAY_MS)
+    }
+
+    // ---------- Voz ----------
+
+    private fun initTts() {
+        if (tts != null) return
+        try {
+            tts = TextToSpeech(context) { status ->
+                val engine = tts ?: return@TextToSpeech
+                if (status != TextToSpeech.SUCCESS) return@TextToSpeech
+                val r = engine.setLanguage(Locale("pt", "BR"))
+                ttsReady = r != TextToSpeech.LANG_MISSING_DATA && r != TextToSpeech.LANG_NOT_SUPPORTED
+                if (ttsReady) {
+                    engine.setSpeechRate(0.85f)
+                    current?.let { speak(if (copyMode) copySpeech(it) else it.speechText()) }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "TTS indisponível: ${e.message}")
+        }
+    }
+
+    private fun speak(text: String) {
+        if (!ttsReady || text.isBlank()) return
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "pergunta")
     }
 
     private fun showKeyboard(view: View) {
@@ -294,23 +428,53 @@ class LockOverlay(
         }
     }
 
-    // ---------- Liberação pelos pais ----------
+    // ---------- Área dos pais ----------
 
-    private fun tryParentUnlock() {
+    /** Confere o PIN digitado (com espera após muitas tentativas erradas). */
+    private fun pinAccepted(): Boolean {
         val pin = etPin.text.toString()
         val wait = PrefsHelper.pinLockRemainingMs(context)
         if (wait > 0) {
             etPin.setText("")
             etPin.hint = "Aguarde ${(wait + 999) / 1000}s"
-            return
+            return false
         }
-        if (PrefsHelper.checkPin(context, pin)) {
+        if (PrefsHelper.checkPin(context, pin)) return true
+        etPin.setText("")
+        etPin.hint = "PIN incorreto"
+        return false
+    }
+
+    private fun tryParentUnlock() {
+        if (pinAccepted()) {
             PrefsHelper.unlockAndReset(context)
             onStateChanged()
-        } else {
-            etPin.setText("")
-            etPin.hint = "PIN incorreto"
         }
+    }
+
+    /**
+     * Pais marcam a pergunta atual como errada: ela é descartada (sai da revisão e do relatório)
+     * e, se a criança errou nela, o erro sai do placar e os minutos de castigo voltam.
+     */
+    private fun flagCurrentQuestion() {
+        val q = current ?: return
+        if (!pinAccepted()) return
+        val refunded = PrefsHelper.refundPenalty(context, q.text)
+        if (refunded != null) Progress.undoLastWrong(context, q.type)
+        AttemptLog.flag(context, q.text)
+        ActivityBank.dropRetry(context, q.text)
+        ActivityBank.finishCurrent(context)
+        Log.i(TAG, "Pergunta marcada como errada pelos pais: ${q.text} -> ${q.answer}")
+
+        etPin.setText("")
+        etPin.hint = "PIN dos pais"
+        llPin.visibility = View.GONE
+        tvFeedback.setTextColor(Color.parseColor("#FDE68A"))
+        tvFeedback.text = "Pergunta descartada." +
+                if (refunded != null && refunded > 0) " $refunded min devolvidos." else ""
+        if (!PrefsHelper.isActivityDone(context)) loadQuestion()
+        refresh()
+        onStateChanged()
     }
 
     // ---------- Util ----------
@@ -325,6 +489,6 @@ class LockOverlay(
 
     companion object {
         private const val TAG = "LockOverlay"
-        private const val WRONG_ANSWER_DELAY_MS = 4_000L
+        private const val COPY_DONE_DELAY_MS = 1_500L
     }
 }

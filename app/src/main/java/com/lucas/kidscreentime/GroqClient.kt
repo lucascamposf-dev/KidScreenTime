@@ -8,15 +8,25 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Gera atividades educativas com a API gratuita do Groq (formato compatível com OpenAI).
+ * Gera perguntas de CONHECIMENTO (animais, natureza, corpo…) com a API gratuita do Groq.
+ * Letras, sílabas e contas NÃO vêm da IA: os modelos erram muito nisso, e o app
+ * gera essas perguntas sozinho em [LocalQuestions] com gabarito calculado.
+ *
+ * Toda pergunta passa por uma CONFERÊNCIA: uma segunda chamada (temperatura 0) responde
+ * sem ver o gabarito; só fica a pergunta em que as duas respostas batem.
+ *
  * Chamada BLOQUEANTE: rode sempre fora da thread principal (Dispatchers.IO).
- * Qualquer falha devolve lista vazia — o app continua funcionando com as continhas locais.
+ * Qualquer falha devolve lista vazia — o app continua funcionando com as perguntas locais.
  */
 object GroqClient {
 
     private const val TAG = "GroqClient"
     private const val API_URL = "https://api.groq.com/openai/v1/chat/completions"
-    private const val MAX_ANSWER_LEN = 20
+    private const val MAX_ANSWER_LEN = 12
+    private const val MAX_TEXT_LEN = 80
+
+    /** Uma palavra só: letras e hífen (ex.: "terça-feira"). */
+    private val ANSWER_RE = Regex("^[\\p{L}-]{1,$MAX_ANSWER_LEN}$")
 
     /** Última falha da IA (vazio = tudo certo). A tela dos pais exibe isso. */
     @Volatile
@@ -27,8 +37,15 @@ object GroqClient {
 
     private const val SYSTEM_PROMPT =
         "Você cria atividades educativas para uma criança brasileira de 6 anos que está aprendendo a ler. " +
-        "Use português do Brasil, frases MUITO curtas (até 8 palavras) e palavras simples, pois ela vai LER SOZINHA, sem ajuda. Prefira palavras de 1 a 3 sílabas e letras MAIÚSCULAS nas palavras-alvo. " +
+        "Use português do Brasil, frases MUITO curtas (até 8 palavras) e palavras simples, pois ela vai LER SOZINHA, sem ajuda. " +
+        "Escreva em MAIÚSCULAS a palavra mais importante da pergunta. " +
         "Responda SOMENTE com JSON válido, sem texto fora do JSON."
+
+    private const val CHECK_PROMPT =
+        "Você é um professor revisando perguntas para uma criança de 6 anos. " +
+        "Responda cada pergunta com UMA palavra só, a resposta mais comum no Brasil. " +
+        "Se a pergunta tiver mais de uma resposta certa ou estiver errada, responda \"?\". " +
+        "Responda SOMENTE com JSON válido."
 
     fun isConfigured(): Boolean = BuildConfig.GROQ_API_KEY.isNotBlank()
 
@@ -36,12 +53,18 @@ object GroqClient {
         if (!isConfigured()) return emptyList()
         for (model in MODELS) {
             try {
-                val result = request(model, count)
-                if (result.isNotEmpty()) {
-                    lastError = ""
-                    return result
+                val generated = generate(model, count)
+                if (generated.isEmpty()) {
+                    lastError = "$model: resposta sem perguntas válidas"
+                    continue
                 }
-                lastError = "$model: resposta sem perguntas válidas"
+                val verified = verify(model, generated)
+                Log.i(TAG, "$model: ${generated.size} geradas, ${verified.size} aprovadas na conferência")
+                if (verified.isNotEmpty()) {
+                    lastError = ""
+                    return verified
+                }
+                lastError = "$model: nenhuma pergunta passou na conferência"
             } catch (e: Exception) {
                 Log.w(TAG, "Falha com $model: ${e.message}")
                 lastError = "$model: ${e.message}"
@@ -52,26 +75,44 @@ object GroqClient {
 
     private fun userPrompt(count: Int): String =
         "Crie $count perguntas em que a criança DIGITA a resposta, todas diferentes entre si (sorteio #${(1000..9999).random()}). " +
-        "Varie os temas: letra inicial de uma palavra, completar palavra simples, sílaba inicial, rimas, " +
-        "animais e natureza, cores e formas, partes do corpo, dias da semana, frutas. " +
-        "NÃO faça perguntas de contas de matemática. " +
-        "A resposta esperada deve ser UMA letra ou UMA palavra curta (até 8 letras), com apenas uma resposta possível. " +
-        "Evite perguntas que tenham várias respostas corretas. " +
-        "Use \"accepted\" só para variações realmente válidas da mesma resposta (pode ser lista vazia). " +
-        "Formato exato: {\"questions\":[{\"topic\":\"português\",\"type\":\"letra inicial\"," +
-        "\"text\":\"Com qual letra começa BOLA?\",\"answer\":\"B\",\"accepted\":[]}]}"
+        "Temas: animais (som, onde vivem, o que comem), natureza, partes do corpo, cores de coisas conhecidas, " +
+        "frutas, dias da semana, estações, profissões, meios de transporte. " +
+        "NÃO faça perguntas sobre letras, sílabas, rimas ou contas — isso já existe no app. " +
+        "A resposta deve ser UMA palavra só (até 10 letras), sem artigo, e só UMA resposta pode estar certa. " +
+        "Bom: \"Qual animal faz MIAU?\" (GATO). Ruim: \"Fale um animal\" (tem muitas respostas). " +
+        "Em \"accepted\" coloque só sinônimos realmente corretos (pode ser lista vazia). " +
+        "Em \"explanation\" escreva uma frase curta que ensina, até 8 palavras. " +
+        "Formato exato: {\"questions\":[{\"topic\":\"animais\",\"text\":\"Qual animal faz MIAU?\"," +
+        "\"answer\":\"GATO\",\"accepted\":[\"GATINHO\"],\"explanation\":\"O GATO faz miau.\"}]}"
 
-    private fun request(model: String, count: Int): List<EduQuestion> {
+    private fun generate(model: String, count: Int): List<EduQuestion> {
+        val content = chat(model, SYSTEM_PROMPT, userPrompt(count), temperature = 0.5, effort = "low")
+        return parse(content)
+    }
+
+    /** Conferência: outra chamada responde às cegas; fica só o que bate com o gabarito. */
+    private fun verify(model: String, questions: List<EduQuestion>): List<EduQuestion> {
+        val list = questions.mapIndexed { i, q -> "${i + 1}. ${q.text}" }.joinToString("\n")
+        val prompt = "Responda às perguntas abaixo, na mesma ordem.\n$list\n" +
+            "Formato exato: {\"answers\":[\"resposta1\",\"resposta2\"]}"
+        val content = chat(model, CHECK_PROMPT, prompt, temperature = 0.0, effort = "medium")
+        val arr = JSONObject(extractJson(content)).getJSONArray("answers")
+        return questions.filterIndexed { i, q ->
+            i < arr.length() && q.isCorrect(arr.optString(i, ""))
+        }
+    }
+
+    private fun chat(model: String, system: String, user: String, temperature: Double, effort: String): String {
         val body = JSONObject()
             .put("model", model)
-            .put("temperature", 0.9)
+            .put("temperature", temperature)
             .put("max_tokens", 4000)
-            .put("reasoning_effort", "low")
+            .put("reasoning_effort", effort)
             .put("response_format", JSONObject().put("type", "json_object"))
             .put(
                 "messages", JSONArray()
-                    .put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
-                    .put(JSONObject().put("role", "user").put("content", userPrompt(count)))
+                    .put(JSONObject().put("role", "system").put("content", system))
+                    .put(JSONObject().put("role", "user").put("content", user))
             )
 
         val conn = (URL(API_URL).openConnection() as HttpURLConnection).apply {
@@ -90,10 +131,9 @@ object GroqClient {
             val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
             if (code !in 200..299) throw IOException("HTTP $code: ${text.take(200)}")
 
-            val content = JSONObject(text)
+            return JSONObject(text)
                 .getJSONArray("choices").getJSONObject(0)
                 .getJSONObject("message").getString("content")
-            return parse(content)
         } finally {
             conn.disconnect()
         }
@@ -105,7 +145,10 @@ object GroqClient {
         return if (s >= 0 && e > s) content.substring(s, e + 1) else content
     }
 
-    /** Valida cada item: descarta sem enunciado, sem resposta ou com resposta longa demais. */
+    /**
+     * Valida cada item: descarta sem enunciado, enunciado longo, resposta que não é UMA palavra
+     * (ex.: "B (de bola)", "gato ou cão") e perguntas cuja resposta já está escrita no enunciado.
+     */
     private fun parse(content: String): List<EduQuestion> {
         val arr = JSONObject(extractJson(content)).getJSONArray("questions")
         val out = mutableListOf<EduQuestion>()
@@ -113,19 +156,31 @@ object GroqClient {
             try {
                 val o = arr.getJSONObject(i)
                 val text = o.optString("text", "").trim()
-                val answer = o.optString("answer", "").trim()
-                if (text.isBlank() || answer.isBlank() || answer.length > MAX_ANSWER_LEN) continue
+                val answer = o.optString("answer", "").trim().trimEnd('.', '!')
+                if (text.isBlank() || text.length > MAX_TEXT_LEN || !ANSWER_RE.matches(answer)) continue
+                val answerNorm = AnswerMatcher.canonical(answer)
+                if (answerNorm.length < 2 || AnswerMatcher.basic(text).split(" ").contains(answerNorm)) continue
 
                 val accArr = o.optJSONArray("accepted")
                 val accepted = if (accArr == null) {
                     emptyList()
                 } else {
                     List(accArr.length()) { accArr.optString(it).trim() }
-                        .filter { it.isNotBlank() && it.length <= MAX_ANSWER_LEN }
+                        .filter { ANSWER_RE.matches(it) }
                 }
-                val topic = o.optString("topic", "").trim().lowercase().ifBlank { "português" }
-                val type = o.optString("type", "").trim().ifBlank { "livre" }
-                out.add(EduQuestion(text, answer, topic, type, accepted))
+                val topic = o.optString("topic", "").trim().lowercase().ifBlank { "conhecimento" }
+                val explanation = o.optString("explanation", "").trim().take(MAX_TEXT_LEN)
+                out.add(
+                    EduQuestion(
+                        text = text,
+                        answer = answer.uppercase(),
+                        topic = topic,
+                        type = "conhecimento",
+                        accepted = accepted,
+                        explanation = explanation,
+                        source = EduQuestion.SRC_AI
+                    )
+                )
             } catch (e: Exception) {
                 // ignora item mal formado
             }

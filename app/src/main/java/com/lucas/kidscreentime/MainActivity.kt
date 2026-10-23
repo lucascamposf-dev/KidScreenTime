@@ -34,6 +34,10 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var content: View
     private lateinit var tvStatus: TextView
+    private lateinit var tvReport: TextView
+    private lateinit var llUpdate: View
+    private lateinit var tvUpdate: TextView
+    private lateinit var btnUpdate: Button
     private lateinit var etUsageMin: EditText
     private lateinit var etBreakMin: EditText
     private lateinit var etRequired: EditText
@@ -43,6 +47,10 @@ class MainActivity : AppCompatActivity() {
     private var authenticated = false
     private var leavingForSettings = false
     private var pinDialog: AlertDialog? = null
+
+    private var pendingUpdate: UpdateInfo? = null
+    private var updateChecked = false
+    private var downloading = false
 
     private val handler = Handler(Looper.getMainLooper())
     private val statusRunnable = object : Runnable {
@@ -61,6 +69,10 @@ class MainActivity : AppCompatActivity() {
 
         content = findViewById(R.id.content)
         tvStatus = findViewById(R.id.tvStatus)
+        tvReport = findViewById(R.id.tvReport)
+        llUpdate = findViewById(R.id.llUpdate)
+        tvUpdate = findViewById(R.id.tvUpdate)
+        btnUpdate = findViewById(R.id.btnUpdate)
         etUsageMin = findViewById(R.id.etUsageMin)
         etBreakMin = findViewById(R.id.etBreakMin)
         etRequired = findViewById(R.id.etRequired)
@@ -75,6 +87,8 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnGenerate).setOnClickListener { generateNow() }
         findViewById<Button>(R.id.btnTestLock).setOnClickListener { testLock() }
         findViewById<Button>(R.id.btnUnlockNow).setOnClickListener { unlockNow() }
+        findViewById<Button>(R.id.btnCheckUpdate).setOnClickListener { checkForUpdate(silent = false) }
+        btnUpdate.setOnClickListener { startUpdate() }
 
         loadSettingsIntoFields()
     }
@@ -137,10 +151,8 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             if (PrefsHelper.checkPin(this, et.text.toString())) {
-                authenticated = true
-                content.visibility = View.VISIBLE
                 dialog.dismiss()
-                updateStatus()
+                onAuthenticated()
             } else {
                 et.setText("")
                 et.hint = "PIN incorreto"
@@ -176,13 +188,19 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Os PINs não são iguais", Toast.LENGTH_SHORT).show()
             } else {
                 PrefsHelper.setPin(this, a)
-                authenticated = true
-                content.visibility = View.VISIBLE
                 dialog.dismiss()
-                updateStatus()
+                onAuthenticated()
             }
         }
         pinDialog = dialog
+    }
+
+    private fun onAuthenticated() {
+        authenticated = true
+        content.visibility = View.VISIBLE
+        updateStatus()
+        // Procura atualização uma vez por abertura da área dos pais, sem incomodar se não houver.
+        if (!updateChecked) checkForUpdate(silent = true)
     }
 
     private fun padded(v: View): View = LinearLayout(this).apply {
@@ -301,6 +319,71 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "Liberado e contador zerado", Toast.LENGTH_SHORT).show()
     }
 
+    // ---------- Atualização do app ----------
+
+    private fun checkForUpdate(silent: Boolean) {
+        if (!UpdateChecker.isConfigured()) {
+            if (!silent) {
+                Toast.makeText(this, "Atualização não configurada: coloque UPDATE_REPO no local.properties e gere o APK de novo", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        if (!silent) Toast.makeText(this, "Procurando atualização...", Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { UpdateChecker.fetchLatest() } }
+            updateChecked = true
+            val info = result.getOrNull()
+            if (info != null && UpdateChecker.isNewer(info)) {
+                pendingUpdate = info
+                tvUpdate.text = "🔄 Nova versão disponível: v${info.versionName}" +
+                        (if (info.notes.isNotBlank()) "\n${info.notes.take(300)}" else "")
+                llUpdate.visibility = View.VISIBLE
+            } else {
+                pendingUpdate = null
+                llUpdate.visibility = View.GONE
+                if (!silent) {
+                    val msg = result.exceptionOrNull()?.let { "Não foi possível procurar: ${it.message}" }
+                        ?: "Você já tem a versão mais nova (v${BuildConfig.VERSION_NAME})"
+                    Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun startUpdate() {
+        val info = pendingUpdate ?: return
+        if (downloading) return
+        if (!UpdateChecker.canInstall(this)) {
+            Toast.makeText(this, "Permita \"instalar apps desconhecidos\" e toque em Atualizar de novo", Toast.LENGTH_LONG).show()
+            leavingForSettings = true
+            startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            return
+        }
+        downloading = true
+        btnUpdate.isEnabled = false
+        btnUpdate.text = "Baixando..."
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    UpdateChecker.download(this@MainActivity, info) { pct ->
+                        runOnUiThread { btnUpdate.text = if (pct >= 0) "Baixando... $pct%" else "Baixando..." }
+                    }
+                }
+            }
+            downloading = false
+            btnUpdate.isEnabled = true
+            result.onSuccess { apk ->
+                btnUpdate.text = "Atualizar agora"
+                // O instalador do Android abre por cima; voltar dele não deve pedir o PIN de novo.
+                leavingForSettings = true
+                startActivity(UpdateChecker.installIntent(this@MainActivity, apk))
+            }.onFailure {
+                btnUpdate.text = "Tentar de novo"
+                Toast.makeText(this@MainActivity, "Falha ao baixar: ${it.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     // ---------- Status ----------
 
     private fun updateStatus() {
@@ -318,9 +401,10 @@ class MainActivity : AppCompatActivity() {
 
         val ia = if (GroqClient.isConfigured())
             "✅ IA Groq: ${ActivityBank.queueSize(this)} atividades guardadas" + (if (GroqClient.lastError.isNotBlank()) "\n⚠ Último erro da IA: ${GroqClient.lastError}" else "")
-        else "⚠ IA Groq sem chave (só continhas de matemática)"
+        else "⚠ IA Groq sem chave (só perguntas do próprio app)"
 
         tvStatus.text = listOf(
+            "Versão do app: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
             state,
             "${mark(Settings.canDrawOverlays(this))} Exibir sobre outros apps",
             "${mark(pm.isIgnoringBatteryOptimizations(packageName))} Bateria sem restrição",
@@ -328,5 +412,49 @@ class MainActivity : AppCompatActivity() {
             "${mark(PrefsHelper.isServiceAlive(this))} Serviço rodando",
             ia
         ).joinToString("\n")
+        tvReport.text = buildReport()
+    }
+
+    // ---------- Relatório de aprendizado ----------
+
+    private fun buildReport(): String {
+        val now = System.currentTimeMillis()
+        val all = AttemptLog.all(this).filter { !it.flagged }
+        if (all.isEmpty()) return "Ainda não há respostas registradas."
+
+        val week = all.filter { it.timestampMs >= now - 7 * DAY_MS }
+        val lines = mutableListOf(
+            "Últimos 7 dias: ${week.count { it.isCorrect }} ✔ acertos · ${week.count { !it.isCorrect }} ✖ erros"
+        )
+        for ((skill, list) in week.groupBy { it.skill }.entries.sortedByDescending { it.value.size }) {
+            val label = LocalQuestions.skill(skill)?.label
+                ?: if (skill == "conhecimento") "Conhecimentos gerais (IA)" else skill
+            val pct = 100 * list.count { it.isCorrect } / list.size
+            lines += "• $label — nível ${Progress.level(this, skill)} — $pct% de ${list.size}"
+        }
+
+        val guess = GuessDetector.analyze(all.filter { it.timestampMs >= now - DAY_MS })
+        val guessLabel = when (guess.level) {
+            GuessLevel.BAIXO -> "baixo ✅"
+            GuessLevel.MEDIO -> "médio ⚠"
+            GuessLevel.ALTO -> "alto ❗"
+        }
+        lines += ""
+        lines += "Sinais de chute (24 h): $guessLabel"
+        guess.reasons.forEach { lines += "  – $it" }
+
+        val errors = all.filter { !it.isCorrect }.takeLast(5).reversed()
+        if (errors.isNotEmpty()) {
+            lines += ""
+            lines += "Últimos erros:"
+            errors.forEach {
+                lines += "• ${it.questionText.replace('\n', ' ')} → digitou \"${it.givenAnswer}\", certo: ${it.correctAnswer}"
+            }
+        }
+        return lines.joinToString("\n")
+    }
+
+    companion object {
+        private const val DAY_MS = 24 * 60 * 60 * 1000L
     }
 }
