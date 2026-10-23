@@ -37,14 +37,16 @@ object GroqClient {
 
     private const val SYSTEM_PROMPT =
         "Você cria atividades educativas para uma criança brasileira de 6 anos que está aprendendo a ler. " +
-        "Use português do Brasil, frases MUITO curtas (até 8 palavras) e palavras simples, pois ela vai LER SOZINHA, sem ajuda. " +
+        "Use português do Brasil, frases curtas (até 10 palavras) e palavras simples, pois ela vai LER SOZINHA, sem ajuda. " +
+        "Toda pergunta deve ser uma frase COMPLETA e correta: com verbo, sem faltar palavra, terminando em \"?\". " +
         "Escreva em MAIÚSCULAS a palavra mais importante da pergunta. " +
         "Responda SOMENTE com JSON válido, sem texto fora do JSON."
 
     private const val CHECK_PROMPT =
         "Você é um professor revisando perguntas para uma criança de 6 anos. " +
         "Responda cada pergunta com UMA palavra só, a resposta mais comum no Brasil. " +
-        "Se a pergunta tiver mais de uma resposta certa ou estiver errada, responda \"?\". " +
+        "Se a pergunta tiver mais de uma resposta certa, estiver errada, confusa, incompleta (faltando palavra) " +
+        "ou com erro de português, responda \"?\". " +
         "Responda SOMENTE com JSON válido."
 
     fun isConfigured(): Boolean = BuildConfig.GROQ_API_KEY.isNotBlank()
@@ -58,7 +60,7 @@ object GroqClient {
                     lastError = "$model: resposta sem perguntas válidas"
                     continue
                 }
-                val verified = verify(model, generated)
+                val verified = verify(generated)
                 Log.i(TAG, "$model: ${generated.size} geradas, ${verified.size} aprovadas na conferência")
                 if (verified.isNotEmpty()) {
                     lastError = ""
@@ -86,16 +88,16 @@ object GroqClient {
         "\"answer\":\"GATO\",\"accepted\":[\"GATINHO\"],\"explanation\":\"O GATO faz miau.\"}]}"
 
     private fun generate(model: String, count: Int): List<EduQuestion> {
-        val content = chat(model, SYSTEM_PROMPT, userPrompt(count), temperature = 0.5, effort = "low")
+        val content = chat(model, SYSTEM_PROMPT, userPrompt(count), temperature = 0.3, effort = "low")
         return parse(content)
     }
 
-    /** Conferência: outra chamada responde às cegas; fica só o que bate com o gabarito. */
-    private fun verify(model: String, questions: List<EduQuestion>): List<EduQuestion> {
+    /** Conferência: o modelo mais forte responde às cegas; fica só o que bate com o gabarito. */
+    private fun verify(questions: List<EduQuestion>): List<EduQuestion> {
         val list = questions.mapIndexed { i, q -> "${i + 1}. ${q.text}" }.joinToString("\n")
         val prompt = "Responda às perguntas abaixo, na mesma ordem.\n$list\n" +
             "Formato exato: {\"answers\":[\"resposta1\",\"resposta2\"]}"
-        val content = chat(model, CHECK_PROMPT, prompt, temperature = 0.0, effort = "medium")
+        val content = chat(MODELS.first(), CHECK_PROMPT, prompt, temperature = 0.0, effort = "medium")
         val arr = JSONObject(extractJson(content)).getJSONArray("answers")
         return questions.filterIndexed { i, q ->
             i < arr.length() && q.isCorrect(arr.optString(i, ""))
@@ -147,7 +149,8 @@ object GroqClient {
 
     /**
      * Valida cada item: descarta sem enunciado, enunciado longo, resposta que não é UMA palavra
-     * (ex.: "B (de bola)", "gato ou cão") e perguntas cuja resposta já está escrita no enunciado.
+     * (ex.: "B (de bola)", "gato ou cão"), frase que não termina em "?" ou com menos de 3 palavras
+     * (sinal de palavra faltando) e perguntas cuja resposta já está escrita no enunciado.
      */
     private fun parse(content: String): List<EduQuestion> {
         val arr = JSONObject(extractJson(content)).getJSONArray("questions")
@@ -157,7 +160,8 @@ object GroqClient {
                 val o = arr.getJSONObject(i)
                 val text = o.optString("text", "").trim()
                 val answer = o.optString("answer", "").trim().trimEnd('.', '!')
-                if (text.isBlank() || text.length > MAX_TEXT_LEN || !ANSWER_RE.matches(answer)) continue
+                if (text.length > MAX_TEXT_LEN || !text.endsWith("?") || text.split(" ").size < 3) continue
+                if (!ANSWER_RE.matches(answer)) continue
                 val answerNorm = AnswerMatcher.canonical(answer)
                 if (answerNorm.length < 2 || AnswerMatcher.basic(text).split(" ").contains(answerNorm)) continue
 

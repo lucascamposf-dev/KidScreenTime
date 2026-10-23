@@ -1,6 +1,7 @@
 package com.lucas.kidscreentime
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
@@ -36,6 +37,7 @@ import java.util.Locale
  *
  * Ao errar, a criança vê a resposta certa com uma explicação e precisa DIGITÁ-LA para seguir
  * (sem novo castigo); a pergunta volta mais tarde para revisão. A pergunta pode ser lida em voz alta.
+ * A criança tem [PrefsHelper.MAX_HINTS_PER_CYCLE] dicas por bloqueio (a 2ª na mesma pergunta revela mais).
  */
 class LockOverlay(
     private val context: Context,
@@ -56,6 +58,8 @@ class LockOverlay(
 
     private var etAnswer: EditText? = null
     private var btnAnswer: Button? = null
+    private var btnHint: Button? = null
+    private var hintLevel = 0
 
     private var current: EduQuestion? = null
     private var shownAt = 0L
@@ -84,11 +88,13 @@ class LockOverlay(
         val btnParent: Button = v.findViewById(R.id.btnParent)
         val btnPinOk: Button = v.findViewById(R.id.btnPinOk)
         val btnFlag: Button = v.findViewById(R.id.btnFlag)
+        val btnSettings: Button = v.findViewById(R.id.btnSettings)
 
         btnParent.visibility = if (PrefsHelper.hasPin(context)) View.VISIBLE else View.GONE
         btnParent.setOnClickListener { llPin.visibility = View.VISIBLE }
         btnPinOk.setOnClickListener { tryParentUnlock() }
         btnFlag.setOnClickListener { flagCurrentQuestion() }
+        btnSettings.setOnClickListener { openParentArea() }
 
         // Engole o botão Voltar.
         v.isFocusableInTouchMode = true
@@ -143,6 +149,7 @@ class LockOverlay(
         root = null
         etAnswer = null
         btnAnswer = null
+        btnHint = null
         tts?.stop()
         tts?.shutdown()
         tts = null
@@ -184,16 +191,24 @@ class LockOverlay(
         shownAt = PrefsHelper.currentQuestionShownAt(context).takeIf { it > 0L } ?: System.currentTimeMillis()
         copyMode = PrefsHelper.isCopyPending(context)
         inputBlocked = false
+        hintLevel = 0
         tvQuestion.text = q.text
         llOptions.removeAllViews()
 
         val et = makeAnswerField(q)
         val btn = makeAnswerButton()
-        llOptions.addView(makeSpeakButton())
+        val hint = makeHintButton()
+        llOptions.addView(LinearLayout(context).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(makeSpeakButton())
+            addView(hint)
+        })
         llOptions.addView(et)
         llOptions.addView(btn)
         etAnswer = et
         btnAnswer = btn
+        btnHint = hint
+        updateHintButton()
 
         if (copyMode) {
             showCopyPrompt(q)
@@ -205,20 +220,26 @@ class LockOverlay(
         et.postDelayed({ showKeyboard(et) }, 250)
     }
 
-    private fun makeSpeakButton(): Button {
+    private fun makePillButton(text: String, color: String): Button {
         val b = Button(context)
-        b.text = "🔊 Ouvir"
+        b.text = text
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
         b.setTextColor(Color.WHITE)
         b.isAllCaps = false
         b.background = GradientDrawable().apply {
-            setColor(Color.parseColor("#3B82F6"))
+            setColor(Color.parseColor(color))
             cornerRadius = dp(16f)
         }
         val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(52f).toInt())
-        lp.gravity = Gravity.CENTER_HORIZONTAL
+        lp.marginStart = dp(6f).toInt()
+        lp.marginEnd = dp(6f).toInt()
         b.layoutParams = lp
-        b.setPadding(dp(24f).toInt(), 0, dp(24f).toInt(), 0)
+        b.setPadding(dp(20f).toInt(), 0, dp(20f).toInt(), 0)
+        return b
+    }
+
+    private fun makeSpeakButton(): Button {
+        val b = makePillButton("🔊 Ouvir", "#3B82F6")
         b.setOnClickListener {
             val q = current ?: return@setOnClickListener
             if (!ttsReady) {
@@ -229,6 +250,51 @@ class LockOverlay(
             speak(if (copyMode) copySpeech(q) else q.speechText())
         }
         return b
+    }
+
+    private fun makeHintButton(): Button {
+        val b = makePillButton("", "#F59E0B")
+        b.setOnClickListener { showHint() }
+        return b
+    }
+
+    private fun updateHintButton() {
+        val b = btnHint ?: return
+        val left = PrefsHelper.hintsLeft(context)
+        b.text = "💡 Dica ($left)"
+        b.isEnabled = left > 0 && !copyMode && hintLevel < 2
+        b.alpha = if (b.isEnabled) 1f else 0.4f
+    }
+
+    /** Gasta uma dica do bloqueio. Palavra: mostra letras; letra/número curto: opções para escolher. */
+    private fun showHint() {
+        val q = current ?: return
+        if (copyMode || hintLevel >= 2 || PrefsHelper.hintsLeft(context) <= 0) return
+        PrefsHelper.useHint(context)
+        hintLevel++
+        val a = q.answer
+        val hint = if (a.length <= 2) {
+            "É uma destas: " + hintChoices(q, if (hintLevel == 1) 3 else 2).joinToString("  ")
+        } else {
+            val mask = a.mapIndexed { i, ch -> if (i == 0 || (hintLevel == 2 && i % 2 == 0)) ch else '_' }
+            "Começa com ${a.first()} e tem ${a.length} ${if (q.numeric) "algarismos" else "letras"}:\n" +
+                mask.joinToString(" ")
+        }
+        tvFeedback.setTextColor(Color.parseColor("#FDE68A"))
+        tvFeedback.text = "💡 $hint"
+        speak(if (a.length <= 2) "é uma destas opções" else "começa com ${LocalQuestions.spoken(a.first().toString())}")
+        updateHintButton()
+    }
+
+    /** A resposta certa misturada com [n] - 1 opções erradas. */
+    private fun hintChoices(q: EduQuestion, n: Int): List<String> {
+        val num = q.answer.toIntOrNull()
+        val pool = if (num != null) {
+            (maxOf(0, num - 3)..num + 3).map { it.toString() }
+        } else {
+            ('A'..'Z').map { it.toString() }
+        }
+        return (pool.filter { it != q.answer }.shuffled().take(n - 1) + q.answer).shuffled()
     }
 
     private fun makeAnswerField(q: EduQuestion): EditText {
@@ -339,6 +405,7 @@ class LockOverlay(
             ActivityBank.scheduleRetry(context, q)
             PrefsHelper.setCopyPending(context, true)
             copyMode = true
+            updateHintButton()
             showCopyPrompt(q)
             speak(copySpeech(q))
         }
@@ -450,6 +517,18 @@ class LockOverlay(
             PrefsHelper.unlockAndReset(context)
             onStateChanged()
         }
+    }
+
+    /** Abre a área dos pais sem liberar o celular: o bloqueio volta quando os pais saem de lá. */
+    private fun openParentArea() {
+        if (!pinAccepted()) return
+        PrefsHelper.grantParentAccess(context)
+        context.startActivity(
+            Intent(context, MainActivity::class.java)
+                .putExtra(MainActivity.EXTRA_PIN_OK, true)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        )
+        onStateChanged()
     }
 
     /**

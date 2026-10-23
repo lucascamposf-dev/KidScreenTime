@@ -95,10 +95,20 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        // Veio da tela de bloqueio com o PIN já conferido.
+        if (intent.getBooleanExtra(EXTRA_PIN_OK, false) && PrefsHelper.hasParentAccess(this)) {
+            intent.removeExtra(EXTRA_PIN_OK)
+            onAuthenticated()
+        }
         if (!authenticated) {
             content.visibility = View.GONE
             if (PrefsHelper.hasPin(this)) askPin() else createPin()
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
     }
 
     override fun onResume() {
@@ -117,6 +127,8 @@ class MainActivity : AppCompatActivity() {
         // Sai da tela dos pais (Home etc.) -> pede o PIN de novo. Ir para as telas de
         // permissão do Android não conta como sair.
         if (!leavingForSettings) {
+            // Se o celular estava bloqueado, a tela de bloqueio volta.
+            PrefsHelper.endParentAccess(this)
             authenticated = false
             content.visibility = View.GONE
         }
@@ -456,5 +468,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val DAY_MS = 24 * 60 * 60 * 1000L
+        const val EXTRA_PIN_OK = "pin_ok"
     }
 }

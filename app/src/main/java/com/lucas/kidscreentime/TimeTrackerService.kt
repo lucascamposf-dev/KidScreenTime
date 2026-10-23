@@ -122,6 +122,10 @@ class TimeTrackerService : Service() {
             overlay.hide()
             return
         }
+        if (PrefsHelper.hasParentAccess(this)) {
+            overlay.hide()
+            return
+        }
         if (!overlay.isShowing) {
             if (Settings.canDrawOverlays(this)) {
                 overlay.show()

@@ -24,6 +24,7 @@ object PrefsHelper {
     const val DEFAULT_REQUIRED_ANSWERS = 3
     const val DEFAULT_PENALTY_MIN = 5
     const val DEFAULT_PENALTY_CAP_MIN = 60
+    const val MAX_HINTS_PER_CYCLE = 2
 
     private const val KEY_USAGE_MIN = "usage_limit_min"
     private const val KEY_BREAK_MIN = "break_min"
@@ -32,6 +33,7 @@ object PrefsHelper {
     private const val KEY_PENALTY_CAP_MIN = "penalty_cap_min_per_cycle"
     private const val KEY_CYCLE_CORRECT = "cycle_correct_count"
     private const val KEY_CYCLE_WRONG = "cycle_wrong_count"
+    private const val KEY_HINTS_USED = "cycle_hints_used"
     private const val KEY_EXTRA_MINUTES = "extra_minutes_accumulated"
     private const val KEY_ACCUMULATED_USAGE_MS = "accumulated_usage_ms"
     private const val KEY_IS_LOCKED = "is_locked"
@@ -47,11 +49,13 @@ object PrefsHelper {
     private const val KEY_CURRENT_SHOWN_AT = "current_question_shown_at"
     private const val KEY_CURRENT_COPY = "current_question_copy_pending"
     private const val KEY_RETRY_QUEUE = "retry_queue"
+    private const val KEY_RECENT_QUESTIONS = "recent_questions"
     private const val KEY_SKILL_PROGRESS = "skill_progress"
     private const val KEY_ATTEMPT_LOG = "attempt_log"
     private const val KEY_LAST_PENALTY_MIN = "last_penalty_min"
     private const val KEY_LAST_PENALTY_Q = "last_penalty_question"
     private const val KEY_HEARTBEAT = "heartbeat"
+    private const val KEY_PARENT_ACCESS_UNTIL = "parent_access_until"
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -104,7 +108,7 @@ object PrefsHelper {
 
     fun isLocked(c: Context): Boolean = prefs(c).getBoolean(KEY_IS_LOCKED, false)
 
-    /** Inicia o bloqueio: a pausa já começa a contar daqui. */
+    /** Inicia o bloqueio: a pausa já começa a contar daqui. Cada bloqueio começa com pergunta nova. */
     fun startLock(c: Context) {
         prefs(c).edit()
             .putBoolean(KEY_IS_LOCKED, true)
@@ -112,9 +116,14 @@ object PrefsHelper {
             .putInt(KEY_CORRECT_COUNT, 0)
             .putInt(KEY_CYCLE_CORRECT, 0)
             .putInt(KEY_CYCLE_WRONG, 0)
+            .putInt(KEY_HINTS_USED, 0)
             .putInt(KEY_EXTRA_MINUTES, 0)
             .remove(KEY_LAST_PENALTY_MIN)
             .remove(KEY_LAST_PENALTY_Q)
+            .remove(KEY_CURRENT_QUESTION)
+            .remove(KEY_CURRENT_SHOWN_AT)
+            .remove(KEY_CURRENT_COPY)
+            .remove(KEY_RETRY_QUEUE)
             .putLong(KEY_BREAK_END_TIMESTAMP, System.currentTimeMillis() + breakMs(c))
             .apply()
     }
@@ -145,6 +154,13 @@ object PrefsHelper {
     fun cycleCorrectCount(c: Context): Int = prefs(c).getInt(KEY_CYCLE_CORRECT, 0)
     fun cycleWrongCount(c: Context): Int = prefs(c).getInt(KEY_CYCLE_WRONG, 0)
     fun extraMinutesAccumulated(c: Context): Int = prefs(c).getInt(KEY_EXTRA_MINUTES, 0)
+
+    /** Dicas que ainda restam neste bloqueio. */
+    fun hintsLeft(c: Context): Int = (MAX_HINTS_PER_CYCLE - prefs(c).getInt(KEY_HINTS_USED, 0)).coerceAtLeast(0)
+
+    fun useHint(c: Context) {
+        prefs(c).edit().putInt(KEY_HINTS_USED, prefs(c).getInt(KEY_HINTS_USED, 0) + 1).apply()
+    }
 
     /** Acerto na atividade: só conta para o placar do ciclo. */
     fun registerCycleCorrect(c: Context) {
@@ -210,6 +226,7 @@ object PrefsHelper {
             .putInt(KEY_CORRECT_COUNT, 0)
             .putInt(KEY_CYCLE_CORRECT, 0)
             .putInt(KEY_CYCLE_WRONG, 0)
+            .putInt(KEY_HINTS_USED, 0)
             .putInt(KEY_EXTRA_MINUTES, 0)
             .remove(KEY_LAST_PENALTY_MIN)
             .remove(KEY_LAST_PENALTY_Q)
@@ -217,6 +234,20 @@ object PrefsHelper {
             .putLong(KEY_ACCUMULATED_USAGE_MS, 0L)
             .apply()
     }
+
+    // ---------- Área dos pais durante o bloqueio ----------
+
+    /** Pais digitaram o PIN na tela de bloqueio: ela some por até 10 min, sem encerrar o bloqueio. */
+    fun grantParentAccess(c: Context) {
+        prefs(c).edit().putLong(KEY_PARENT_ACCESS_UNTIL, System.currentTimeMillis() + 10 * 60_000L).apply()
+    }
+
+    fun endParentAccess(c: Context) {
+        prefs(c).edit().remove(KEY_PARENT_ACCESS_UNTIL).apply()
+    }
+
+    fun hasParentAccess(c: Context): Boolean =
+        System.currentTimeMillis() < prefs(c).getLong(KEY_PARENT_ACCESS_UNTIL, 0L)
 
     // ---------- PIN dos pais ----------
 
@@ -306,6 +337,12 @@ object PrefsHelper {
 
     fun setCopyPending(c: Context, pending: Boolean) {
         prefs(c).edit().putBoolean(KEY_CURRENT_COPY, pending).apply()
+    }
+
+    fun getRecentQuestionsJson(c: Context): String? = prefs(c).getString(KEY_RECENT_QUESTIONS, null)
+
+    fun setRecentQuestionsJson(c: Context, json: String) {
+        prefs(c).edit().putString(KEY_RECENT_QUESTIONS, json).apply()
     }
 
     fun getRetryQueueJson(c: Context): String? = prefs(c).getString(KEY_RETRY_QUEUE, null)

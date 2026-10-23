@@ -82,19 +82,18 @@ data class EduQuestion(
 
 /**
  * Fonte das atividades:
- *  - revisão: perguntas erradas voltam 2–3 perguntas depois (até 2 vezes);
+ *  - revisão: perguntas erradas voltam 2–3 perguntas depois (até 2 vezes), só no mesmo bloqueio;
  *  - perguntas de conhecimento geradas pela IA (Groq) e já verificadas, guardadas no aparelho;
  *  - perguntas locais (português e matemática) com gabarito calculado, no nível de cada habilidade.
  * A pergunta em andamento fica salva: reabrir a tela de bloqueio não troca de pergunta.
+ * As últimas [MAX_RECENT] perguntas ficam salvas para não se repetirem, mesmo entre bloqueios.
  */
 object ActivityBank {
 
     private const val MAX_QUEUE = 40
     private const val AI_SHARE_PERCENT = 30
     private const val MAX_RETRIES = 2
-
-    /** Últimos enunciados, para não repetir a mesma pergunta em seguida. */
-    private val recent = ArrayDeque<String>()
+    private const val MAX_RECENT = 60
 
     @Synchronized
     fun queueSize(context: Context): Int = loadList(PrefsHelper.getQuestionQueueJson(context)).size
@@ -154,10 +153,18 @@ object ActivityBank {
     // ---------- Sorteio ----------
 
     private fun pickNext(context: Context): EduQuestion {
-        val q = dueRetry(context) ?: aiQuestion(context) ?: localQuestion(context)
-        recent.addLast(q.text)
-        while (recent.size > 10) recent.removeFirst()
+        val recent = recentTexts(context)
+        val q = dueRetry(context) ?: aiQuestion(context, recent) ?: localQuestion(context, recent)
+        recent.remove(q.text)
+        recent.add(q.text)
+        PrefsHelper.setRecentQuestionsJson(context, JSONArray(recent.takeLast(MAX_RECENT)).toString())
         return q
+    }
+
+    private fun recentTexts(context: Context): MutableList<String> {
+        val arr = PrefsHelper.getRecentQuestionsJson(context)?.let { runCatching { JSONArray(it) }.getOrNull() }
+            ?: return mutableListOf()
+        return MutableList(arr.length()) { arr.optString(it) }
     }
 
     /** Desconta 1 de espera em cada revisão e devolve a primeira que venceu. */
@@ -179,20 +186,21 @@ object ActivityBank {
         return due
     }
 
-    private fun aiQuestion(context: Context): EduQuestion? {
+    /** Tira a próxima pergunta da IA da fila, descartando as que já apareceram. */
+    private fun aiQuestion(context: Context, recent: List<String>): EduQuestion? {
         if (Random.nextInt(100) >= AI_SHARE_PERCENT) return null
         val queue = loadList(PrefsHelper.getQuestionQueueJson(context))
-        if (queue.isEmpty()) return null
-        val q = queue.removeAt(0)
+        queue.removeAll { it.text in recent }
+        val q = queue.removeFirstOrNull()
         PrefsHelper.setQuestionQueueJson(context, saveList(queue))
         return q
     }
 
     /** Sorteia uma habilidade, dando mais peso às que a criança erra mais. */
-    private fun localQuestion(context: Context): EduQuestion {
+    private fun localQuestion(context: Context, recent: List<String>): EduQuestion {
         val skills = LocalQuestions.skills
         val weights = skills.map { 1.0 + 2.0 * Progress.errorRate(context, it.key) }
-        repeat(10) {
+        repeat(30) {
             var r = Random.nextDouble() * weights.sum()
             var chosen = skills.last()
             for ((i, s) in skills.withIndex()) {
