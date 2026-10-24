@@ -44,7 +44,7 @@ object PrefsHelper {
     private const val KEY_PIN_FAILS = "pin_fail_count"
     private const val KEY_PIN_LOCK_UNTIL = "pin_lock_until"
     private const val MAX_PIN_FAILS = 5
-    private const val KEY_QUESTION_QUEUE = "question_queue"
+    private const val KEY_QUESTION_QUEUE = "question_queue_v2" // v2: descarta perguntas antigas sem a conferência nova
     private const val KEY_CURRENT_QUESTION = "current_question"
     private const val KEY_CURRENT_SHOWN_AT = "current_question_shown_at"
     private const val KEY_CURRENT_COPY = "current_question_copy_pending"

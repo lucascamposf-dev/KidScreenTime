@@ -1,9 +1,11 @@
 package com.lucas.kidscreentime
 
+import android.app.AlarmManager
 import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -57,7 +59,25 @@ class TimeTrackerService : Service() {
         if (intent?.action == ACTION_FORCE_LOCK && !PrefsHelper.isLocked(this)) {
             lockNow()
         }
+        scheduleWatchdog(WATCHDOG_MS)
         return START_STICKY
+    }
+
+    /** Fechou o app pelos Recentes: alguns celulares (Samsung) matam o serviço junto. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        scheduleWatchdog(RESTART_MS)
+    }
+
+    /** Alarme que religa o serviço pelo [BootReceiver] se ele tiver sido fechado. */
+    private fun scheduleWatchdog(delayMs: Long) {
+        val pi = PendingIntent.getBroadcast(
+            this, 0,
+            Intent(this, BootReceiver::class.java).setAction(ACTION_WATCHDOG),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + delayMs, pi)
     }
 
     private fun startTicking() {
@@ -174,6 +194,7 @@ class TimeTrackerService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        scheduleWatchdog(RESTART_MS)
         overlay.hide()
         scope.cancel()
     }
@@ -185,6 +206,9 @@ class TimeTrackerService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val REFILL_BELOW = 6
         private const val REFILL_RETRY_MS = 5 * 60 * 1000L
+        private const val WATCHDOG_MS = 5 * 60 * 1000L
+        private const val RESTART_MS = 3_000L
         const val ACTION_FORCE_LOCK = "com.lucas.kidscreentime.FORCE_LOCK"
+        const val ACTION_WATCHDOG = "com.lucas.kidscreentime.WATCHDOG"
     }
 }

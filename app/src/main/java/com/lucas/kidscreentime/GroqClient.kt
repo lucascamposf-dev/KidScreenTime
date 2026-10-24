@@ -12,8 +12,9 @@ import java.net.URL
  * Letras, sílabas e contas NÃO vêm da IA: os modelos erram muito nisso, e o app
  * gera essas perguntas sozinho em [LocalQuestions] com gabarito calculado.
  *
- * Toda pergunta passa por uma CONFERÊNCIA: uma segunda chamada (temperatura 0) responde
- * sem ver o gabarito; só fica a pergunta em que as duas respostas batem.
+ * Toda pergunta passa por uma CONFERÊNCIA: uma segunda chamada (temperatura 0), sem ver o gabarito,
+ * lista todas as respostas certas. Pergunta confusa ou com muitas respostas é descartada; as outras
+ * respostas certas passam a ser aceitas (ex.: som PIU -> PASSARINHO ou PINTINHO).
  *
  * Chamada BLOQUEANTE: rode sempre fora da thread principal (Dispatchers.IO).
  * Qualquer falha devolve lista vazia — o app continua funcionando com as perguntas locais.
@@ -24,6 +25,7 @@ object GroqClient {
     private const val API_URL = "https://api.groq.com/openai/v1/chat/completions"
     private const val MAX_ANSWER_LEN = 12
     private const val MAX_TEXT_LEN = 80
+    private const val MAX_VALID_ANSWERS = 3
 
     /** Uma palavra só: letras e hífen (ex.: "terça-feira"). */
     private val ANSWER_RE = Regex("^[\\p{L}-]{1,$MAX_ANSWER_LEN}$")
@@ -44,9 +46,9 @@ object GroqClient {
 
     private const val CHECK_PROMPT =
         "Você é um professor revisando perguntas para uma criança de 6 anos. " +
-        "Responda cada pergunta com UMA palavra só, a resposta mais comum no Brasil. " +
-        "Se a pergunta tiver mais de uma resposta certa, estiver errada, confusa, incompleta (faltando palavra) " +
-        "ou com erro de português, responda \"?\". " +
+        "Para cada pergunta, liste TODAS as respostas de uma palavra que uma criança daria e que estão certas. " +
+        "Marque ok=false se a pergunta estiver errada, confusa, estranha, incompleta (faltando palavra), " +
+        "com erro de português, ou se tiver muitas respostas certas diferentes. " +
         "Responda SOMENTE com JSON válido."
 
     fun isConfigured(): Boolean = BuildConfig.GROQ_API_KEY.isNotBlank()
@@ -92,15 +94,27 @@ object GroqClient {
         return parse(content)
     }
 
-    /** Conferência: o modelo mais forte responde às cegas; fica só o que bate com o gabarito. */
+    /**
+     * Conferência: o modelo mais forte lista às cegas as respostas certas. Fica a pergunta aprovada,
+     * com até [MAX_VALID_ANSWERS] respostas e que inclua o gabarito; as demais passam a ser aceitas.
+     */
     private fun verify(questions: List<EduQuestion>): List<EduQuestion> {
         val list = questions.mapIndexed { i, q -> "${i + 1}. ${q.text}" }.joinToString("\n")
-        val prompt = "Responda às perguntas abaixo, na mesma ordem.\n$list\n" +
-            "Formato exato: {\"answers\":[\"resposta1\",\"resposta2\"]}"
+        val prompt = "Revise as perguntas abaixo, na mesma ordem.\n$list\n" +
+            "Formato exato: {\"answers\":[{\"ok\":true,\"all\":[\"PASSARINHO\",\"PINTINHO\"]}]}"
         val content = chat(MODELS.first(), CHECK_PROMPT, prompt, temperature = 0.0, effort = "medium")
         val arr = JSONObject(extractJson(content)).getJSONArray("answers")
-        return questions.filterIndexed { i, q ->
-            i < arr.length() && q.isCorrect(arr.optString(i, ""))
+        return questions.mapIndexedNotNull { i, q ->
+            val o = arr.optJSONObject(i) ?: return@mapIndexedNotNull null
+            val all = o.optJSONArray("all") ?: return@mapIndexedNotNull null
+            val valid = List(all.length()) { all.optString(it).trim() }
+                .filter { ANSWER_RE.matches(it) }
+                .distinctBy { AnswerMatcher.canonical(it) }
+            if (!o.optBoolean("ok", false) || valid.size > MAX_VALID_ANSWERS || valid.none { q.isCorrect(it) }) {
+                null
+            } else {
+                q.copy(accepted = (q.accepted + valid.map { it.uppercase() }).distinct())
+            }
         }
     }
 
